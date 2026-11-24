@@ -1,19 +1,13 @@
 import asyncio
-import html
 import logging
 
 from telethon import TelegramClient, events
 from telethon.tl.types import Channel
 from telegram import Bot
-from telegram.constants import ParseMode
 
 import config
-from database import (
-    init_db,
-    save_post,
-    latest_posts,
-    active_subscribers,
-)
+from database import init_db
+from processor import process_post
 
 
 logging.basicConfig(
@@ -29,34 +23,6 @@ def channel_link(channel, message_id):
     return f"https://t.me/{channel}"
 
 
-def post_text(channel, message_id, text):
-    link = channel_link(channel, message_id)
-    body = text.strip() if text and text.strip() else "(فایل یا رسانه)"
-    if len(body) > 3500:
-        body = body[:3497] + "..."
-    return (
-        f"📢 @{html.escape(channel)}\n\n"
-        f"{html.escape(body)}\n\n"
-        f"<a href=\"{html.escape(link)}\">مشاهده در کانال</a>"
-    )
-
-
-async def push_post(channel, message_id, text, bot):
-    if not config.PUSH_TO_SUBSCRIBERS:
-        return
-    message = post_text(channel, message_id, text)
-    for chat_id in active_subscribers():
-        try:
-            await bot.send_message(
-                chat_id=chat_id,
-                text=message,
-                parse_mode=ParseMode.HTML,
-                disable_web_page_preview=True,
-            )
-        except Exception as exc:
-            logger.warning("Could not send post to %s: %s", chat_id, exc)
-
-
 async def collect_once(client, bot, push):
     for username in config.CHANNELS:
         try:
@@ -70,9 +36,15 @@ async def collect_once(client, bot, push):
                 text = message.text or message.message or ""
                 date = message.date.isoformat() if message.date else ""
                 link = channel_link(username, message.id)
-                is_new = save_post(username, message.id, text, date, link)
-                if is_new and push:
-                    await push_post(username, message.id, text, bot)
+                await process_post(
+                    username,
+                    message.id,
+                    text,
+                    date,
+                    link,
+                    bot,
+                    notify=push and config.PUSH_TO_SUBSCRIBERS,
+                )
         except Exception as exc:
             logger.exception("Failed to collect @%s: %s", username, exc)
 
@@ -112,9 +84,15 @@ async def main():
         text = event.raw_text or ""
         date = event.message.date.isoformat() if event.message.date else ""
         link = channel_link(username, event.message.id)
-        is_new = save_post(username, event.message.id, text, date, link)
-        if is_new:
-            await push_post(username, event.message.id, text, bot)
+        await process_post(
+            username,
+            event.message.id,
+            text,
+            date,
+            link,
+            bot,
+            notify=config.PUSH_TO_SUBSCRIBERS,
+        )
 
     await collect_once(client, bot, push=False)
 
