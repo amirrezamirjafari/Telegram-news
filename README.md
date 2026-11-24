@@ -17,7 +17,9 @@ Qwen analysis.
   Persian posts are delivered without analysis; other relevant posts are sent
   raw first, followed by Qwen's impact ranking and market analysis.
 - If the model API is unavailable, the raw post is sent with an analysis-failure
-  warning so news is not lost.
+  warning so news is not lost. Temporary rate-limit and network errors are
+  retried with exponential backoff; failed analyses are scheduled for up to
+  five total attempts, including across collector restarts.
 - One user session can read public channels it has subscribed to, and private
   channels it is allowed to join.
 

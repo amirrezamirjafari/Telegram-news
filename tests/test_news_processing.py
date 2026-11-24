@@ -3,9 +3,10 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import database
+import processor
 from model_api import ModelAPIError
 from news_filter import fingerprint, is_financially_relevant, normalize_news
 from processor import process_post
@@ -43,6 +44,7 @@ class FakeBot:
 
 class NewsProcessingTest(unittest.TestCase):
     def setUp(self):
+        processor._NEXT_MODEL_REQUEST_AT = 0
         fd = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         fd.close()
         self.db_path = Path(fd.name)
@@ -222,6 +224,67 @@ class NewsProcessingTest(unittest.TestCase):
                 "SELECT analysis_status FROM posts WHERE channel='markets' AND message_id=32"
             ).fetchone()[0]
         self.assertEqual(status, "advertisement")
+
+    def test_rate_limit_retries_then_delivers_once(self):
+        bot = FakeBot()
+        rate_limit = ModelAPIError(
+            "Model API returned HTTP 429",
+            retryable=True,
+            retry_after_seconds=0,
+        )
+        with patch(
+            "processor.analyze_news",
+            side_effect=[rate_limit, model_result()],
+        ) as analyze, patch(
+            "processor.asyncio.sleep", new_callable=AsyncMock
+        ) as sleep, patch(
+            "processor._retry_delay", return_value=0
+        ):
+            result = asyncio.run(
+                process_post(
+                    "markets", 33, "Central bank cuts interest rates.",
+                    "2026-11-24T11:03:00+00:00", "https://t.me/markets/33",
+                    bot, notify=True,
+                )
+            )
+
+        self.assertEqual(result, "processed")
+        self.assertEqual(analyze.call_count, 2)
+        sleep.assert_awaited_once()
+        self.assertEqual(len(bot.messages), 2)
+        with database.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT analysis_attempts, analysis_status, next_retry_at
+                FROM posts WHERE channel='markets' AND message_id=33
+                """
+            ).fetchone()
+        self.assertEqual(row, (2, "complete", None))
+
+    def test_scheduled_retry_does_not_resend_raw_post(self):
+        bot = FakeBot()
+        text = "Central bank cuts interest rates."
+        database.save_post(
+            "markets", 34, text, "2026-11-24T11:04:00+00:00", ""
+        )
+        database.mark_post_relevant("markets", 34, True)
+        database.begin_analysis_attempt("markets", 34, max_attempts=5)
+        database.save_analysis_error(
+            "markets", 34, "temporary failure", retry_after_seconds=0
+        )
+        database.mark_raw_sent("markets", 34)
+
+        with patch("processor.analyze_news", return_value=model_result()):
+            result = asyncio.run(
+                process_post(
+                    "markets", 34, text, "2026-11-24T11:04:00+00:00",
+                    "", bot, notify=True,
+                )
+            )
+
+        self.assertEqual(result, "processed")
+        self.assertEqual(len(bot.messages), 1)
+        self.assertIn("تحلیل Qwen", bot.messages[0])
 
     def test_analysis_failure_is_persisted_after_raw_delivery(self):
         bot = FakeBot()

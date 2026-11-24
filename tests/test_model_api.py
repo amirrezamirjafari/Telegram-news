@@ -2,6 +2,7 @@ import io
 import json
 import unittest
 from unittest.mock import patch
+from urllib.error import HTTPError
 
 import config
 from model_api import ModelAPIError, analyze_news
@@ -69,6 +70,23 @@ class ModelAPITest(unittest.TestCase):
         with patch.object(config, "MODEL_API_KEY", ""):
             with self.assertRaisesRegex(ModelAPIError, "MODEL_API_KEY"):
                 analyze_news("Bank rates change")
+
+    def test_rate_limit_error_is_retryable_and_reads_retry_after(self):
+        error = HTTPError(
+            "https://example.test/api/v1/chat/completions",
+            429,
+            "Rate limited",
+            {"Retry-After": "3"},
+            None,
+        )
+        with patch.object(config, "MODEL_API_KEY", "test-token"), patch(
+            "model_api.urlopen", side_effect=error
+        ):
+            with self.assertRaises(ModelAPIError) as raised:
+                analyze_news("Bank rates change")
+
+        self.assertTrue(raised.exception.retryable)
+        self.assertEqual(raised.exception.retry_after_seconds, 3)
 
 
 if __name__ == "__main__":

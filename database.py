@@ -44,6 +44,9 @@ def init_db():
                 impact_score INTEGER,
                 analysis_status TEXT NOT NULL DEFAULT 'pending',
                 analysis_error TEXT,
+                analysis_attempts INTEGER NOT NULL DEFAULT 0,
+                next_retry_at TEXT,
+                raw_sent INTEGER NOT NULL DEFAULT 0,
                 analyzed_at TEXT,
                 UNIQUE(channel, message_id)
             );
@@ -72,6 +75,8 @@ def init_db():
             "impact_score": "INTEGER",
             "analysis_status": "TEXT NOT NULL DEFAULT 'pending'",
             "analysis_error": "TEXT",
+            "analysis_attempts": "INTEGER NOT NULL DEFAULT 0",
+            "next_retry_at": "TEXT",
             "analyzed_at": "TEXT",
         }
         for column, definition in migrations.items():
@@ -79,6 +84,21 @@ def init_db():
                 connection.execute(
                     f"ALTER TABLE posts ADD COLUMN {column} {definition}"
                 )
+        if "raw_sent" not in columns:
+            connection.execute(
+                "ALTER TABLE posts ADD COLUMN raw_sent INTEGER NOT NULL DEFAULT 0"
+            )
+            connection.execute(
+                "UPDATE posts SET raw_sent=1 WHERE analysis_status='failed'"
+            )
+        connection.execute(
+            """
+            UPDATE posts SET next_retry_at=?
+            WHERE analysis_status='failed' AND analysis_attempts=0
+              AND next_retry_at IS NULL
+            """,
+            (utc_now(),),
+        )
         connection.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_posts_relevant_seen
@@ -108,12 +128,14 @@ def mark_post_relevant(channel, message_id, relevant, normalized_hash=None):
             """
             UPDATE posts
             SET relevant=?, normalized_hash=?,
-                analysis_status=CASE WHEN ?=1 THEN analysis_status ELSE 'filtered' END
+                analysis_status=CASE WHEN ?=1 THEN analysis_status ELSE 'filtered' END,
+                next_retry_at=CASE WHEN ?=1 THEN next_retry_at ELSE NULL END
             WHERE channel=? AND message_id=?
             """,
             (
                 int(relevant),
                 normalized_hash,
+                int(relevant),
                 int(relevant),
                 channel,
                 message_id,
@@ -128,7 +150,7 @@ def mark_post_advertisement(channel, message_id):
             """
             UPDATE posts
             SET relevant=0, analysis_status='advertisement', analysis_json=NULL,
-                analysis_error=NULL, impact_score=NULL
+                analysis_error=NULL, impact_score=NULL, next_retry_at=NULL
             WHERE channel=? AND message_id=?
             """,
             (channel, message_id),
@@ -142,9 +164,18 @@ def mark_analysis_not_required(channel, message_id):
             """
             UPDATE posts
             SET analysis_status='not_required', analysis_json=NULL,
-                analysis_error=NULL, impact_score=NULL
+                analysis_error=NULL, impact_score=NULL, next_retry_at=NULL
             WHERE channel=? AND message_id=?
             """,
+            (channel, message_id),
+        )
+        connection.commit()
+
+
+def mark_raw_sent(channel, message_id):
+    with connect() as connection:
+        connection.execute(
+            "UPDATE posts SET raw_sent=1 WHERE channel=? AND message_id=?",
             (channel, message_id),
         )
         connection.commit()
@@ -154,11 +185,78 @@ def post_processing_status(channel, message_id):
     with connect() as connection:
         return connection.execute(
             """
-            SELECT relevant, analysis_status, duplicate_of_channel
+            SELECT relevant, analysis_status, duplicate_of_channel,
+                   analysis_attempts, next_retry_at, raw_sent
             FROM posts WHERE channel=? AND message_id=?
             """,
             (channel, message_id),
         ).fetchone()
+
+
+def begin_analysis_attempt(channel, message_id, max_attempts):
+    now = utc_now()
+    with connect() as connection:
+        cursor = connection.execute(
+            """
+            UPDATE posts
+            SET analysis_attempts=analysis_attempts+1,
+                analysis_status='analyzing', analysis_error=NULL,
+                next_retry_at=NULL
+            WHERE channel=? AND message_id=? AND analysis_attempts<?
+              AND (
+                analysis_status='pending'
+                OR (
+                    analysis_status='failed' AND next_retry_at IS NOT NULL
+                    AND next_retry_at<=?
+                )
+              )
+            """,
+            (channel, message_id, max_attempts, now),
+        )
+        if not cursor.rowcount:
+            return None
+        row = connection.execute(
+            """
+            SELECT analysis_attempts FROM posts
+            WHERE channel=? AND message_id=?
+            """,
+            (channel, message_id),
+        ).fetchone()
+        connection.commit()
+        return row[0]
+
+
+def retryable_posts(max_attempts, limit=100):
+    now = utc_now()
+    with connect() as connection:
+        return connection.execute(
+            """
+            SELECT channel, message_id, text, date, link
+            FROM posts
+            WHERE analysis_status='failed' AND next_retry_at IS NOT NULL
+              AND next_retry_at<=? AND analysis_attempts<?
+            ORDER BY next_retry_at, id
+            LIMIT ?
+            """,
+            (now, max_attempts, limit),
+        ).fetchall()
+
+
+def recover_interrupted_analyses(max_attempts):
+    now = utc_now()
+    with connect() as connection:
+        connection.execute(
+            """
+            UPDATE posts
+            SET analysis_status='failed',
+                analysis_error='Analysis interrupted before completion',
+                next_retry_at=CASE WHEN analysis_attempts<?
+                    THEN ? ELSE NULL END
+            WHERE analysis_status='analyzing'
+            """,
+            (max_attempts, now),
+        )
+        connection.commit()
 
 
 def find_duplicate(normalized_text, normalized_hash, exclude_channel,
@@ -238,7 +336,7 @@ def mark_duplicate(channel, message_id, original_channel, original_message_id,
             UPDATE posts
             SET duplicate_of_channel=?, duplicate_of_message_id=?,
                 duplicate_similarity=?, dedup_method=?,
-                analysis_status='duplicate'
+                analysis_status='duplicate', next_retry_at=NULL
             WHERE channel=? AND message_id=?
             """,
             (
@@ -261,7 +359,7 @@ def save_analysis(channel, message_id, analysis):
             """
             UPDATE posts
             SET analysis_json=?, impact_score=?, analysis_status='complete',
-                analysis_error=NULL, analyzed_at=?
+                analysis_error=NULL, next_retry_at=NULL, analyzed_at=?
             WHERE channel=? AND message_id=?
             """,
             (
@@ -275,15 +373,21 @@ def save_analysis(channel, message_id, analysis):
         connection.commit()
 
 
-def save_analysis_error(channel, message_id, error):
+def save_analysis_error(channel, message_id, error, retry_after_seconds=None):
+    next_retry_at = None
+    if retry_after_seconds is not None:
+        retry_at = datetime.now(timezone.utc) + timedelta(
+            seconds=max(0, retry_after_seconds)
+        )
+        next_retry_at = retry_at.isoformat(timespec="seconds")
     with connect() as connection:
         connection.execute(
             """
             UPDATE posts
-            SET analysis_status='failed', analysis_error=?
+            SET analysis_status='failed', analysis_error=?, next_retry_at=?
             WHERE channel=? AND message_id=?
             """,
-            (error, channel, message_id),
+            (error, next_retry_at, channel, message_id),
         )
         connection.commit()
 
