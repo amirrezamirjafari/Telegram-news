@@ -6,8 +6,9 @@ from telethon.tl.types import Channel
 from telegram import Bot
 
 import config
+import database
 from database import init_db
-from processor import process_post
+from processor import MAX_ANALYSIS_ATTEMPTS, process_post
 
 
 logging.basicConfig(
@@ -45,9 +46,24 @@ async def collect_once(client, bot, push):
                     link,
                     bot,
                     notify=push and config.PUSH_TO_SUBSCRIBERS,
+                    retry_failed=push,
                 )
         except Exception as exc:
             logger.exception("Failed to collect @%s: %s", username, exc)
+
+
+async def retry_failed_posts(bot):
+    posts = database.retryable_posts(MAX_ANALYSIS_ATTEMPTS)
+    for channel, message_id, text, date, link in posts:
+        await process_post(
+            channel,
+            message_id,
+            text,
+            date,
+            link,
+            bot,
+            notify=config.PUSH_TO_SUBSCRIBERS,
+        )
 
 
 async def main():
@@ -61,6 +77,7 @@ async def main():
         raise RuntimeError("CHANNELS must contain at least one channel")
 
     init_db()
+    database.recover_interrupted_analyses(MAX_ANALYSIS_ATTEMPTS)
     bot = Bot(token=config.BOT_TOKEN)
     client = TelegramClient(
         "collector",
@@ -96,9 +113,11 @@ async def main():
         )
 
     await collect_once(client, bot, push=False)
+    await retry_failed_posts(bot)
 
     while True:
         await collect_once(client, bot, push=True)
+        await retry_failed_posts(bot)
         await asyncio.sleep(config.POLL_INTERVAL_SECONDS)
 
 

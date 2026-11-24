@@ -1,4 +1,6 @@
 import json
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -7,6 +9,29 @@ import config
 
 class ModelAPIError(RuntimeError):
     """A safe-to-log model API failure that never includes credentials."""
+
+    def __init__(self, message, retryable=False, retry_after_seconds=None):
+        super().__init__(message)
+        self.retryable = retryable
+        self.retry_after_seconds = retry_after_seconds
+
+
+def _retry_after_seconds(value):
+    if not value:
+        return None
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        try:
+            retry_at = parsedate_to_datetime(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=timezone.utc)
+        return max(
+            0.0,
+            (retry_at - datetime.now(timezone.utc)).total_seconds(),
+        )
 
 
 def analyze_news(text, channel=""):
@@ -62,21 +87,30 @@ def analyze_news(text, channel=""):
             payload = json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
         raise ModelAPIError(
-            f"Model API returned HTTP {exc.code}"
+            f"Model API returned HTTP {exc.code}",
+            retryable=exc.code == 429 or 500 <= exc.code < 600,
+            retry_after_seconds=_retry_after_seconds(
+                exc.headers.get("Retry-After") if exc.headers else None
+            ),
         ) from None
     except (URLError, TimeoutError):
         raise ModelAPIError(
-            "Model API request failed; check network connectivity"
+            "Model API request failed; check network connectivity",
+            retryable=True,
         ) from None
     except (UnicodeDecodeError, json.JSONDecodeError):
-        raise ModelAPIError("Model API returned an invalid response") from None
+        raise ModelAPIError(
+            "Model API returned an invalid response",
+            retryable=True,
+        ) from None
 
     try:
         response_text = payload["choices"][0]["message"]["content"]
         result = json.loads(response_text)
     except (KeyError, IndexError, TypeError, json.JSONDecodeError):
         raise ModelAPIError(
-            "Model API response did not contain valid classification JSON"
+            "Model API response did not contain valid classification JSON",
+            retryable=True,
         ) from None
 
     return _validate_result(result)
@@ -84,13 +118,19 @@ def analyze_news(text, channel=""):
 
 def _validate_result(data):
     if not isinstance(data, dict):
-        raise ModelAPIError("Model classification has an invalid structure")
+        raise ModelAPIError(
+            "Model classification has an invalid structure", retryable=True
+        )
     if not isinstance(data.get("is_advertisement"), bool):
-        raise ModelAPIError("Model classification has an invalid ad flag")
+        raise ModelAPIError("Model classification has an invalid ad flag", retryable=True)
     if not isinstance(data.get("is_persian"), bool):
-        raise ModelAPIError("Model classification has an invalid language flag")
+        raise ModelAPIError(
+            "Model classification has an invalid language flag", retryable=True
+        )
     if not isinstance(data.get("advertisement_reason"), str):
-        raise ModelAPIError("Model classification is missing advertisement_reason")
+        raise ModelAPIError(
+            "Model classification is missing advertisement_reason", retryable=True
+        )
 
     result = {
         "is_advertisement": data["is_advertisement"],
@@ -113,20 +153,24 @@ def _validate_market_analysis(data):
         "rationale",
     )
     if not isinstance(data, dict):
-        raise ModelAPIError("Model analysis has an invalid structure")
+        raise ModelAPIError("Model analysis has an invalid structure", retryable=True)
     if data.get("impact_level") not in levels:
-        raise ModelAPIError("Model analysis has an invalid impact level")
+        raise ModelAPIError("Model analysis has an invalid impact level", retryable=True)
     if data.get("sentiment") not in sentiments:
-        raise ModelAPIError("Model analysis has an invalid sentiment")
+        raise ModelAPIError("Model analysis has an invalid sentiment", retryable=True)
     for key in ("impact_score", "confidence"):
         value = data.get(key)
         if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 100:
-            raise ModelAPIError(f"Model analysis has an invalid {key}")
+            raise ModelAPIError(
+                f"Model analysis has an invalid {key}", retryable=True
+            )
     if not isinstance(data.get("affected_assets"), list) or not all(
         isinstance(item, str) for item in data["affected_assets"]
     ):
-        raise ModelAPIError("Model analysis has invalid affected assets")
+        raise ModelAPIError("Model analysis has invalid affected assets", retryable=True)
     for key in required_strings:
         if not isinstance(data.get(key), str):
-            raise ModelAPIError(f"Model analysis is missing {key}")
+            raise ModelAPIError(
+                f"Model analysis is missing {key}", retryable=True
+            )
     return data

@@ -2,6 +2,7 @@ import asyncio
 import html
 import json
 import logging
+import time
 
 from telegram.constants import ParseMode
 
@@ -18,15 +19,78 @@ _SENTIMENT_LABELS = {
     "neutral": "خنثی",
     "mixed": "ترکیبی",
 }
+MAX_ANALYSIS_ATTEMPTS = 5
+_BASE_RETRY_DELAY_SECONDS = 2
+_MAX_RETRY_DELAY_SECONDS = 3600
+_MIN_MODEL_REQUEST_INTERVAL_SECONDS = 1
+_MODEL_REQUEST_LOCK = asyncio.Lock()
+_NEXT_MODEL_REQUEST_AT = 0.0
 
 
-async def process_post(channel, message_id, text, date, link, bot, notify):
+def _retry_delay(attempt, error):
+    delay = error.retry_after_seconds
+    if delay is None:
+        delay = _BASE_RETRY_DELAY_SECONDS * (2 ** (attempt - 1))
+    return max(1, min(_MAX_RETRY_DELAY_SECONDS, delay))
+
+
+async def _analyze_with_throttle(text, channel, attempt):
+    global _NEXT_MODEL_REQUEST_AT
+
+    async with _MODEL_REQUEST_LOCK:
+        delay = _NEXT_MODEL_REQUEST_AT - time.monotonic()
+        if delay > 0:
+            await asyncio.sleep(delay)
+        try:
+            result = await asyncio.to_thread(analyze_news, text, channel)
+        except ModelAPIError as exc:
+            delay = (
+                _retry_delay(attempt, exc)
+                if exc.retryable
+                else _MIN_MODEL_REQUEST_INTERVAL_SECONDS
+            )
+            _NEXT_MODEL_REQUEST_AT = max(
+                _NEXT_MODEL_REQUEST_AT,
+                time.monotonic() + delay,
+            )
+            raise
+        _NEXT_MODEL_REQUEST_AT = max(
+            _NEXT_MODEL_REQUEST_AT,
+            time.monotonic() + _MIN_MODEL_REQUEST_INTERVAL_SECONDS,
+        )
+        return result
+
+
+async def _broadcast_raw_once(channel, message_id, text, link, bot, raw_sent):
+    if not raw_sent:
+        await broadcast_raw(channel, message_id, text, link, bot)
+        database.mark_raw_sent(channel, message_id)
+    return True
+
+
+async def process_post(
+    channel, message_id, text, date, link, bot, notify, retry_failed=True
+):
     is_new = database.save_post(channel, message_id, text, date, link)
+    raw_sent = False
     if not is_new:
         current = database.post_processing_status(channel, message_id)
-        if not current or current[1] != "pending":
+        if not current:
             return "existing"
-        notify = False
+        status = current[1]
+        raw_sent = bool(current[5])
+        if status == "pending":
+            notify = False
+        elif status == "failed":
+            if (
+                not retry_failed
+                or current[3] >= MAX_ANALYSIS_ATTEMPTS
+                or not current[4]
+                or current[4] > database.utc_now()
+            ):
+                return "existing"
+        else:
+            return "existing"
 
     relevant = is_financially_relevant(text)
     normalized = normalize_news(text)
@@ -55,25 +119,65 @@ async def process_post(channel, message_id, text, date, link, bot, notify):
         )
         return "duplicate"
 
-    try:
-        result = await asyncio.to_thread(analyze_news, text, channel)
-    except ModelAPIError as exc:
-        database.save_analysis_error(channel, message_id, str(exc))
-        logger.warning(
-            "Model analysis failed for @%s/%s: %s", channel, message_id, exc
+    while True:
+        attempt = database.begin_analysis_attempt(
+            channel, message_id, MAX_ANALYSIS_ATTEMPTS
         )
-        if notify:
-            await broadcast_raw(channel, message_id, text, link, bot)
-            await broadcast_analysis_error(channel, message_id, str(exc), bot)
-        return "analysis_failed"
-    except Exception as exc:
-        error = f"Model analysis failed ({type(exc).__name__})"
-        database.save_analysis_error(channel, message_id, error)
-        logger.exception("Unexpected model analysis failure for @%s/%s", channel, message_id)
-        if notify:
-            await broadcast_raw(channel, message_id, text, link, bot)
-            await broadcast_analysis_error(channel, message_id, error, bot)
-        return "analysis_failed"
+        if attempt is None:
+            return "existing"
+        try:
+            result = await _analyze_with_throttle(text, channel, attempt)
+            break
+        except ModelAPIError as exc:
+            delay = (
+                _retry_delay(attempt, exc)
+                if exc.retryable and attempt < MAX_ANALYSIS_ATTEMPTS
+                else None
+            )
+            database.save_analysis_error(
+                channel,
+                message_id,
+                str(exc),
+                retry_after_seconds=delay,
+            )
+            if delay is not None:
+                logger.warning(
+                    "Model request failed for @%s/%s; retry %s/%s in %.1fs",
+                    channel,
+                    message_id,
+                    attempt + 1,
+                    MAX_ANALYSIS_ATTEMPTS,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+                continue
+            logger.warning(
+                "Model analysis failed for @%s/%s after %s attempt(s): %s",
+                channel,
+                message_id,
+                attempt,
+                exc,
+            )
+            if notify:
+                raw_sent = await _broadcast_raw_once(
+                    channel, message_id, text, link, bot, raw_sent
+                )
+                await broadcast_analysis_error(channel, message_id, str(exc), bot)
+            return "analysis_failed"
+        except Exception as exc:
+            error = f"Model analysis failed ({type(exc).__name__})"
+            database.save_analysis_error(channel, message_id, error)
+            logger.exception(
+                "Unexpected model analysis failure for @%s/%s",
+                channel,
+                message_id,
+            )
+            if notify:
+                raw_sent = await _broadcast_raw_once(
+                    channel, message_id, text, link, bot, raw_sent
+                )
+                await broadcast_analysis_error(channel, message_id, error, bot)
+            return "analysis_failed"
 
     if result["is_advertisement"]:
         database.mark_post_advertisement(channel, message_id)
@@ -88,12 +192,16 @@ async def process_post(channel, message_id, text, date, link, bot, notify):
     if result["is_persian"]:
         database.mark_analysis_not_required(channel, message_id)
         if notify:
-            await broadcast_raw(channel, message_id, text, link, bot)
+            await _broadcast_raw_once(
+                channel, message_id, text, link, bot, raw_sent
+            )
         return "analysis_not_required"
 
     analysis = result["analysis"]
     if notify:
-        await broadcast_raw(channel, message_id, text, link, bot)
+        raw_sent = await _broadcast_raw_once(
+            channel, message_id, text, link, bot, raw_sent
+        )
     database.save_analysis(channel, message_id, analysis)
     if notify:
         await broadcast_analysis(channel, message_id, analysis, bot)
