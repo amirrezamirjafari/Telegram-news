@@ -108,7 +108,7 @@ async def latest(update: Update, context: ContextTypes.DEFAULT_TYPE):
         body = text.strip() if text and text.strip() else "(فایل یا رسانه)"
         body = body[:3000]
         message = (
-            f"📢 <b>خبر خام | @{html.escape(post_channel)}</b>\n\n"
+            f"📢 <b>منبع | @{html.escape(post_channel)}</b>\n\n"
             f"{html.escape(body)}\n\n"
             f"<a href=\"{html.escape(link or '')}\">مشاهده در کانال</a>"
         )

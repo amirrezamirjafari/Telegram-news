@@ -19,6 +19,13 @@ ANALYSIS = {
     "rationale": "اطلاعات محدود است",
 }
 
+MODEL_RESULT = {
+    "is_advertisement": False,
+    "advertisement_reason": "",
+    "is_persian": False,
+    "analysis": ANALYSIS,
+}
+
 
 class ModelAPITest(unittest.TestCase):
     def test_posts_to_configured_openai_compatible_endpoint(self):
@@ -28,7 +35,9 @@ class ModelAPITest(unittest.TestCase):
                     "choices": [
                         {
                             "message": {
-                                "content": json.dumps(ANALYSIS, ensure_ascii=False)
+                                "content": json.dumps(
+                                    MODEL_RESULT, ensure_ascii=False
+                                )
                             }
                         }
                     ]
@@ -54,7 +63,7 @@ class ModelAPITest(unittest.TestCase):
         )
         self.assertEqual(request.get_header("Authorization"), "Bearer test-token")
         self.assertEqual(body["model"], "manageit/qwen3.8-27b")
-        self.assertEqual(result, ANALYSIS)
+        self.assertEqual(result, MODEL_RESULT)
 
     def test_requires_api_key(self):
         with patch.object(config, "MODEL_API_KEY", ""):

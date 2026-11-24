@@ -12,9 +12,12 @@ Qwen analysis.
 - All collected posts are archived in SQLite. Financial relevance is tagged;
   near-identical financial posts are linked to the earlier story and not sent
   for repeat analysis.
-- Relevant news is delivered raw first, then with Qwen's impact ranking,
-  fundamental and sentiment analysis, and a cautious discussion of potential
-  chart impact. Analyses are archived with the original post.
+- Financially relevant posts are checked by Qwen for channel promotions before
+  delivery. Promotional posts are archived but not sent or listed by `/latest`.
+  Persian posts are delivered without analysis; other relevant posts are sent
+  raw first, followed by Qwen's impact ranking and market analysis.
+- If the model API is unavailable, the raw post is sent with an analysis-failure
+  warning so news is not lost.
 - One user session can read public channels it has subscribed to, and private
   channels it is allowed to join.
 
