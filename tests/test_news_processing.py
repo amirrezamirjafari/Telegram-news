@@ -24,6 +24,15 @@ ANALYSIS = {
 }
 
 
+def model_result(analysis=ANALYSIS, is_advertisement=False, is_persian=False):
+    return {
+        "is_advertisement": is_advertisement,
+        "advertisement_reason": "تبلیغ خدمات کانال" if is_advertisement else "",
+        "is_persian": is_persian,
+        "analysis": None if is_advertisement or is_persian else analysis,
+    }
+
+
 class FakeBot:
     def __init__(self):
         self.messages = []
@@ -61,7 +70,7 @@ class NewsProcessingTest(unittest.TestCase):
 
     def test_sends_raw_before_analysis_and_persists_analysis(self):
         bot = FakeBot()
-        with patch("processor.analyze_news", return_value=ANALYSIS):
+        with patch("processor.analyze_news", return_value=model_result()):
             result = asyncio.run(
                 process_post(
                     "markets", 10,
@@ -73,15 +82,18 @@ class NewsProcessingTest(unittest.TestCase):
                 )
             )
         self.assertEqual(result, "processed")
-        self.assertIn("خبر خام", bot.messages[0])
+        self.assertIn("منبع", bot.messages[0])
         self.assertIn("تحلیل Qwen", bot.messages[1])
+        self.assertIn("⚡", bot.messages[1])
+        self.assertIn("این تحلیل توصیه سرمایه گذاری نیست.", bot.messages[1])
+        self.assertNotIn("این تحلیل احتمالی", bot.messages[1])
         news = database.latest_news(limit=1)[0]
         self.assertEqual(news[6], "complete")
         self.assertEqual(json.loads(news[5]), ANALYSIS)
 
     def test_filters_irrelevant_and_deduplicates_near_identical_news(self):
         bot = FakeBot()
-        with patch("processor.analyze_news", return_value=ANALYSIS) as analyze:
+        with patch("processor.analyze_news", return_value=model_result()) as analyze:
             irrelevant = asyncio.run(
                 process_post(
                     "markets", 1, "A new film opens this weekend",
@@ -131,7 +143,10 @@ class NewsProcessingTest(unittest.TestCase):
         bot = FakeBot()
         lower = {**ANALYSIS, "impact_level": "low", "impact_score": 20}
         higher = {**ANALYSIS, "impact_level": "high", "impact_score": 90}
-        with patch("processor.analyze_news", side_effect=[lower, higher]):
+        with patch(
+            "processor.analyze_news",
+            side_effect=[model_result(lower), model_result(higher)],
+        ):
             asyncio.run(
                 process_post(
                     "markets", 20, "Bank shares rise as rates fall.",
@@ -152,7 +167,7 @@ class NewsProcessingTest(unittest.TestCase):
         database.save_post(
             "markets", 30, text, "2026-11-24T11:00:00+00:00", ""
         )
-        with patch("processor.analyze_news", return_value=ANALYSIS):
+        with patch("processor.analyze_news", return_value=model_result()):
             result = asyncio.run(
                 process_post(
                     "markets", 30, text, "2026-11-24T11:00:00+00:00",
@@ -162,6 +177,51 @@ class NewsProcessingTest(unittest.TestCase):
         self.assertEqual(result, "processed")
         self.assertEqual(bot.messages, [])
         self.assertEqual(database.latest_news(limit=1)[0][6], "complete")
+
+    def test_persian_news_is_sent_without_analysis(self):
+        bot = FakeBot()
+        with patch(
+            "processor.analyze_news",
+            return_value=model_result(is_persian=True),
+        ) as analyze:
+            result = asyncio.run(
+                process_post(
+                    "markets", 31, "بانک مرکزی نرخ بهره را تغییر داد",
+                    "2026-11-24T11:01:00+00:00", "https://t.me/markets/31",
+                    bot, notify=True,
+                )
+            )
+
+        self.assertEqual(result, "analysis_not_required")
+        analyze.assert_called_once()
+        self.assertEqual(len(bot.messages), 1)
+        self.assertIn("منبع", bot.messages[0])
+        self.assertEqual(database.latest_news(limit=1)[0][5], None)
+        self.assertEqual(database.latest_news(limit=1)[0][6], "not_required")
+
+    def test_advertisement_is_filtered_before_delivery(self):
+        bot = FakeBot()
+        with patch(
+            "processor.analyze_news",
+            return_value=model_result(is_advertisement=True),
+        ) as classify:
+            result = asyncio.run(
+                process_post(
+                    "markets", 32, "Join our paid forex signals group today.",
+                    "2026-11-24T11:02:00+00:00", "https://t.me/markets/32",
+                    bot, notify=True,
+                )
+            )
+
+        self.assertEqual(result, "advertisement")
+        classify.assert_called_once()
+        self.assertEqual(bot.messages, [])
+        self.assertEqual(database.latest_news(limit=10), [])
+        with database.connect() as connection:
+            status = connection.execute(
+                "SELECT analysis_status FROM posts WHERE channel='markets' AND message_id=32"
+            ).fetchone()[0]
+        self.assertEqual(status, "advertisement")
 
     def test_analysis_failure_is_persisted_after_raw_delivery(self):
         bot = FakeBot()
@@ -176,7 +236,7 @@ class NewsProcessingTest(unittest.TestCase):
                 )
             )
         self.assertEqual(result, "analysis_failed")
-        self.assertIn("خبر خام", bot.messages[0])
+        self.assertIn("منبع", bot.messages[0])
         self.assertIn("تحلیل", bot.messages[1])
         news = database.latest_news(limit=1)[0]
         self.assertEqual(news[6], "failed")

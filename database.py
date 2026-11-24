@@ -122,6 +122,34 @@ def mark_post_relevant(channel, message_id, relevant, normalized_hash=None):
         connection.commit()
 
 
+def mark_post_advertisement(channel, message_id):
+    with connect() as connection:
+        connection.execute(
+            """
+            UPDATE posts
+            SET relevant=0, analysis_status='advertisement', analysis_json=NULL,
+                analysis_error=NULL, impact_score=NULL
+            WHERE channel=? AND message_id=?
+            """,
+            (channel, message_id),
+        )
+        connection.commit()
+
+
+def mark_analysis_not_required(channel, message_id):
+    with connect() as connection:
+        connection.execute(
+            """
+            UPDATE posts
+            SET analysis_status='not_required', analysis_json=NULL,
+                analysis_error=NULL, impact_score=NULL
+            WHERE channel=? AND message_id=?
+            """,
+            (channel, message_id),
+        )
+        connection.commit()
+
+
 def post_processing_status(channel, message_id):
     with connect() as connection:
         return connection.execute(
@@ -281,6 +309,7 @@ def latest_news(channel=None, limit=10):
         "SELECT channel, message_id, text, date, link, analysis_json, "
         "analysis_status, analysis_error FROM posts "
         "WHERE relevant=1 AND duplicate_of_channel IS NULL "
+        "AND analysis_status!='advertisement' "
     )
     params = []
     if channel:

@@ -16,16 +16,24 @@ def analyze_news(text, channel=""):
         )
 
     prompt = (
-        "Analyze this Telegram news post for financial markets. Respond only "
-        "with a valid JSON object containing: impact_level (high, medium, or "
-        "low), impact_score (integer 0-100), sentiment (bullish, bearish, "
-        "neutral, or mixed), affected_assets (array of strings), "
-        "fundamental_analysis (string), sentiment_analysis (string), "
-        "chart_impact (string), confidence (integer 0-100), and rationale "
-        "(string). Assess likely direction and time horizon cautiously; "
-        "explain uncertainty and do not present predictions as guarantees or "
-        "personalized investment advice. Write analysis in Persian. "
-        f"Source channel: @{channel}\nNews:\n{text}"
+        "Classify this Telegram post and analyze it only when requested. "
+        "Respond only with a valid JSON object containing is_advertisement "
+        "(boolean), advertisement_reason (string), is_persian (boolean), and "
+        "analysis (object or null). Set is_advertisement to true for channel "
+        "self-promotion, invitations to join/follow, paid courses or signals, "
+        "affiliate/referral promotions, and ads for the channel's own services. "
+        "Do not classify ordinary reporting about a company's product as an ad. "
+        "Set is_persian according to the post's primary language. If the post "
+        "is an advertisement or is primarily in Persian, set analysis to null. "
+        "Otherwise analysis must contain impact_level (high, medium, or low), "
+        "impact_score (integer 0-100), sentiment (bullish, bearish, neutral, "
+        "or mixed), affected_assets (array of strings), fundamental_analysis "
+        "(string), sentiment_analysis (string), chart_impact (string), "
+        "confidence (integer 0-100), and rationale (string). Assess likely "
+        "direction and time horizon cautiously; explain uncertainty and do not "
+        "present predictions as guarantees or personalized investment advice. "
+        "Write advertisement_reason and analysis in Persian. "
+        f"Source channel: @{channel}\nPost:\n{text}"
     )
     body = json.dumps(
         {
@@ -65,16 +73,37 @@ def analyze_news(text, channel=""):
 
     try:
         response_text = payload["choices"][0]["message"]["content"]
-        analysis = json.loads(response_text)
+        result = json.loads(response_text)
     except (KeyError, IndexError, TypeError, json.JSONDecodeError):
         raise ModelAPIError(
-            "Model API response did not contain valid analysis JSON"
+            "Model API response did not contain valid classification JSON"
         ) from None
 
-    return _validate_analysis(analysis)
+    return _validate_result(result)
 
 
-def _validate_analysis(data):
+def _validate_result(data):
+    if not isinstance(data, dict):
+        raise ModelAPIError("Model classification has an invalid structure")
+    if not isinstance(data.get("is_advertisement"), bool):
+        raise ModelAPIError("Model classification has an invalid ad flag")
+    if not isinstance(data.get("is_persian"), bool):
+        raise ModelAPIError("Model classification has an invalid language flag")
+    if not isinstance(data.get("advertisement_reason"), str):
+        raise ModelAPIError("Model classification is missing advertisement_reason")
+
+    result = {
+        "is_advertisement": data["is_advertisement"],
+        "advertisement_reason": data["advertisement_reason"],
+        "is_persian": data["is_persian"],
+        "analysis": None,
+    }
+    if not result["is_advertisement"] and not result["is_persian"]:
+        result["analysis"] = _validate_market_analysis(data.get("analysis"))
+    return result
+
+
+def _validate_market_analysis(data):
     levels = {"high", "medium", "low"}
     sentiments = {"bullish", "bearish", "neutral", "mixed"}
     required_strings = (
