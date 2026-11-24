@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import database
-from gemini import GeminiAPIError
+from model_api import ModelAPIError
 from news_filter import fingerprint, is_financially_relevant, normalize_news
 from processor import process_post
 
@@ -74,7 +74,7 @@ class NewsProcessingTest(unittest.TestCase):
             )
         self.assertEqual(result, "processed")
         self.assertIn("خبر خام", bot.messages[0])
-        self.assertIn("تحلیل Gemini", bot.messages[1])
+        self.assertIn("تحلیل Qwen", bot.messages[1])
         news = database.latest_news(limit=1)[0]
         self.assertEqual(news[6], "complete")
         self.assertEqual(json.loads(news[5]), ANALYSIS)
@@ -167,7 +167,7 @@ class NewsProcessingTest(unittest.TestCase):
         bot = FakeBot()
         with patch(
             "processor.analyze_news",
-            side_effect=GeminiAPIError("GEMINI_API_KEY is not configured"),
+            side_effect=ModelAPIError("MODEL_API_KEY is not configured"),
         ):
             result = asyncio.run(
                 process_post(
@@ -180,7 +180,7 @@ class NewsProcessingTest(unittest.TestCase):
         self.assertIn("تحلیل", bot.messages[1])
         news = database.latest_news(limit=1)[0]
         self.assertEqual(news[6], "failed")
-        self.assertIn("GEMINI_API_KEY", news[7])
+        self.assertIn("MODEL_API_KEY", news[7])
 
 
 if __name__ == "__main__":

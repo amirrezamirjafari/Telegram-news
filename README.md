@@ -2,7 +2,7 @@
 
 A private Telegram news collector that filters configured channels for financial
 news, removes repeat stories, and delivers raw news followed by a separate
-Gemini analysis.
+Qwen analysis.
 
 ## How it works
 
@@ -12,7 +12,7 @@ Gemini analysis.
 - All collected posts are archived in SQLite. Financial relevance is tagged;
   near-identical financial posts are linked to the earlier story and not sent
   for repeat analysis.
-- Relevant news is delivered raw first, then with Gemini's impact ranking,
+- Relevant news is delivered raw first, then with Qwen's impact ranking,
   fundamental and sentiment analysis, and a cautious discussion of potential
   chart impact. Analyses are archived with the original post.
 - One user session can read public channels it has subscribed to, and private
@@ -24,10 +24,12 @@ Gemini analysis.
 2. Copy `.env.example` to `.env`.
 3. Set `BOT_TOKEN`, `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`,
    `TELEGRAM_PHONE`, `OWNER_ID`, and `CHANNELS`.
-4. To enable Gemini analysis, set `GEMINI_API_KEY` from Google AI Studio in
-   `.env`. Optionally set `GEMINI_MODEL` (defaults to `gemini-2.5-flash`). The
-   collector still archives and delivers relevant raw posts when the key is
-   absent; it records and reports that analysis could not be completed.
+4. Set `MODEL_API_KEY` to your ManageIT API key in `.env`. The default endpoint
+   is `https://ai.manageit.dev/api/v1` and the default model is
+   `manageit/qwen3.8-27b`; override them with `MODEL_API_BASE_URL` and
+   `MODEL_NAME` if needed. The collector still archives and delivers relevant
+   raw posts when the key is absent; it records and reports that analysis
+   could not be completed.
 5. Install dependencies:
 
    ```bash
@@ -54,6 +56,6 @@ and `@iamusd`. Override them with a comma-separated `CHANNELS` value.
 
 Keep `.env`, `*.session`, and `news.db` private and untracked.
 
-Gemini analysis is informational and probabilistic, not a guaranteed market
+Qwen analysis is informational and probabilistic, not a guaranteed market
 prediction or personalized investment advice. API errors are recorded against
 the post and do not stop collection.
