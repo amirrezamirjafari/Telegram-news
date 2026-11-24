@@ -6,4 +6,6 @@ __pycache__/
 *.session-journal
 news.db
 news.db-journal
+news.db-shm
+news.db-wal
 *.log
