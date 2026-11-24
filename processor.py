@@ -6,7 +6,7 @@ import logging
 from telegram.constants import ParseMode
 
 import database
-from gemini import GeminiAPIError, analyze_news
+from model_api import ModelAPIError, analyze_news
 from news_filter import fingerprint, is_financially_relevant, normalize_news
 
 
@@ -60,18 +60,18 @@ async def process_post(channel, message_id, text, date, link, bot, notify):
 
     try:
         analysis = await asyncio.to_thread(analyze_news, text, channel)
-    except GeminiAPIError as exc:
+    except ModelAPIError as exc:
         database.save_analysis_error(channel, message_id, str(exc))
         logger.warning(
-            "Gemini analysis failed for @%s/%s: %s", channel, message_id, exc
+            "Model analysis failed for @%s/%s: %s", channel, message_id, exc
         )
         if notify:
             await broadcast_analysis_error(channel, message_id, str(exc), bot)
         return "analysis_failed"
     except Exception as exc:
-        error = f"Gemini analysis failed ({type(exc).__name__})"
+        error = f"Model analysis failed ({type(exc).__name__})"
         database.save_analysis_error(channel, message_id, error)
-        logger.exception("Unexpected analysis failure for @%s/%s", channel, message_id)
+        logger.exception("Unexpected model analysis failure for @%s/%s", channel, message_id)
         if notify:
             await broadcast_analysis_error(channel, message_id, error, bot)
         return "analysis_failed"
@@ -85,7 +85,7 @@ async def process_post(channel, message_id, text, date, link, bot, notify):
 def format_analysis(channel, message_id, analysis):
     assets = analysis["affected_assets"] or ["مشخص نشده"]
     body = (
-        f"🧠 <b>تحلیل Gemini | @{html.escape(channel)} #{message_id}</b>\n"
+        f"🧠 <b>تحلیل Qwen | @{html.escape(channel)} #{message_id}</b>\n"
         f"اولویت اثر: <b>{_IMPACT_LABELS[analysis['impact_level']]}</b> "
         f"({analysis['impact_score']}/100)\n"
         f"سنتیمنت: <b>{_SENTIMENT_LABELS[analysis['sentiment']]}</b>\n"
