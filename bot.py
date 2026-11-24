@@ -12,10 +12,11 @@ from telegram.ext import (
 import config
 from database import (
     init_db,
-    latest_posts,
+    latest_news,
     add_subscriber,
     remove_subscriber,
 )
+from processor import analysis_for_latest, format_analysis
 
 
 logging.basicConfig(
@@ -45,7 +46,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     add_subscriber(update.effective_chat.id)
     await update.effective_message.reply_text(
         "ربات خبر کانال‌ها آماده است.\n"
-        "• /latest - آخرین ۱۰ پیام همه کانال‌ها\n"
+        "• /latest - ۱۰ خبر مالی اخیر، مرتب‌شده بر اساس اثر احتمالی\n"
         "• /latest @channel - آخرین پیام یک کانال\n"
         "• /channels - فهرست کانال‌ها\n"
         "• /unsubscribe - توقف ارسال خودکار",
@@ -86,18 +87,27 @@ async def latest(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-    posts = latest_posts(channel=channel, limit=10)
+    posts = latest_news(channel=channel, limit=10)
     if not posts:
         await update.effective_message.reply_text(
             "هنوز پیام جدیدی جمع‌آوری نشده است."
         )
         return
 
-    for post_channel, message_id, text, date, link in posts:
+    for (
+        post_channel,
+        message_id,
+        text,
+        date,
+        link,
+        analysis_json,
+        analysis_status,
+        analysis_error,
+    ) in posts:
         body = text.strip() if text and text.strip() else "(فایل یا رسانه)"
-        body = body[:3500]
+        body = body[:3000]
         message = (
-            f"📢 @{html.escape(post_channel)}\n\n"
+            f"📢 <b>خبر خام | @{html.escape(post_channel)}</b>\n\n"
             f"{html.escape(body)}\n\n"
             f"<a href=\"{html.escape(link or '')}\">مشاهده در کانال</a>"
         )
@@ -106,6 +116,19 @@ async def latest(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
         )
+        analysis = analysis_for_latest(analysis_json)
+        if analysis:
+            await update.effective_message.reply_text(
+                format_analysis(post_channel, message_id, analysis),
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+        elif analysis_status == "failed":
+            await update.effective_message.reply_text(
+                "⚠️ تحلیل این خبر در دسترس نیست: "
+                f"{html.escape(analysis_error or 'خطای نامشخص')}",
+                parse_mode=ParseMode.HTML,
+            )
 
 
 def main():
