@@ -1,9 +1,10 @@
 import asyncio
 import logging
 
-from telethon import TelegramClient, events
+from telethon import TelegramClient, client, events
 from telethon.tl.types import Channel
 from telegram import Bot
+from telethon.sessions import StringSession
 
 import config
 import database
@@ -80,14 +81,17 @@ async def main():
     database.recover_interrupted_analyses(MAX_ANALYSIS_ATTEMPTS)
     bot = Bot(token=config.BOT_TOKEN)
     client = TelegramClient(
-        "collector",
+        StringSession(config.TELEGRAM_SESSION),
         config.TELEGRAM_API_ID,
         config.TELEGRAM_API_HASH,
     )
 
-    await client.start(phone=config.TELEGRAM_PHONE or None)
-    me = await client.get_me()
-    logger.info("Collector logged in as %s", me.username or me.id)
+    await client.connect()
+    if not await client.is_user_authorized():
+     raise RuntimeError(
+        "TELEGRAM_SESSION is missing or invalid. "
+        "Generate it locally with make_session.py and set it in Railway variables."
+    )
 
     allowed = set(config.CHANNELS)
 

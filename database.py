@@ -1,10 +1,11 @@
+import os
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
-DB_PATH = Path(__file__).with_name("news.db")
+DB_PATH = Path(os.getenv("DB_PATH", Path(__file__).with_name("news.db")))
 
 
 @contextmanager

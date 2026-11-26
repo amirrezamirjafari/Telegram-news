@@ -9,3 +9,4 @@ news.db-journal
 news.db-shm
 news.db-wal
 *.log
+make_session.py

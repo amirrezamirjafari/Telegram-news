@@ -22,6 +22,7 @@ OWNER_ID = int(os.getenv("OWNER_ID", "0") or "0")
 TELEGRAM_API_ID = int(os.getenv("TELEGRAM_API_ID", "0") or "0")
 TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH", "")
 TELEGRAM_PHONE = os.getenv("TELEGRAM_PHONE", "")
+TELEGRAM_SESSION = os.getenv("TELEGRAM_SESSION", "")
 POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "300"))
 PUSH_TO_SUBSCRIBERS = os.getenv("PUSH_TO_SUBSCRIBERS", "1") == "1"
 MODEL_API_BASE_URL = os.getenv(
