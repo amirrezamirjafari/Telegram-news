@@ -34,8 +34,11 @@ def _retry_after_seconds(value):
         )
 
 
-def analyze_news(text, channel=""):
-    if not config.MODEL_API_KEY:
+def analyze_news(text, channel="", base_url=None, api_key=None, model=None):
+    base_url = base_url or config.MODEL_API_BASE_URL
+    api_key = api_key if api_key is not None else config.MODEL_API_KEY
+    model = model or config.MODEL_NAME
+    if not api_key:
         raise ModelAPIError(
             "MODEL_API_KEY is not configured; add it to the local .env file"
         )
@@ -62,7 +65,7 @@ def analyze_news(text, channel=""):
     )
     body = json.dumps(
         {
-            "model": config.MODEL_NAME,
+            "model": model,
             "messages": [
                 {
                     "role": "system",
@@ -74,11 +77,11 @@ def analyze_news(text, channel=""):
         }
     ).encode("utf-8")
     request = Request(
-        f"{config.MODEL_API_BASE_URL.rstrip('/')}/chat/completions",
+        f"{base_url.rstrip('/')}/chat/completions",
         data=body,
         headers={
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {config.MODEL_API_KEY}",
+            "Authorization": f"Bearer {api_key}",
         },
         method="POST",
     )
@@ -105,7 +108,9 @@ def analyze_news(text, channel=""):
         ) from None
 
     try:
-        response_text = payload["choices"][0]["message"]["content"]
+        response_text = (payload["choices"][0]["message"]["content"] or "").strip()
+        if response_text.startswith("```"):
+            response_text = response_text.strip("`").removeprefix("json").strip()
         result = json.loads(response_text)
     except (KeyError, IndexError, TypeError, json.JSONDecodeError):
         raise ModelAPIError(

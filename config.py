@@ -30,6 +30,15 @@ MODEL_API_BASE_URL = os.getenv(
 ).rstrip("/")
 MODEL_API_KEY = os.getenv("MODEL_API_KEY", "")
 MODEL_NAME = os.getenv("MODEL_NAME", "manageit/qwen3.8-27b")
+MIN_IMPACT_SCORE = int(os.getenv("MIN_IMPACT_SCORE", "50"))
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_API_BASE_URL = os.getenv(
+    "GEMINI_API_BASE_URL",
+    "https://generativelanguage.googleapis.com/v1beta/openai",
+).rstrip("/")
+GEMINI_MIN_INTERVAL_SECONDS = float(os.getenv("GEMINI_MIN_INTERVAL_SECONDS", "7"))
+GEMINI_BORDERLINE_RANGE = int(os.getenv("GEMINI_BORDERLINE_RANGE", "15"))
 
 CHANNELS = [
     item.strip().lstrip("@").lower()

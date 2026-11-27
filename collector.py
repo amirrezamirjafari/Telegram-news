@@ -26,8 +26,13 @@ def channel_link(channel, message_id):
     return f"https://t.me/{channel}"
 
 
+_SEEN_CHANNELS = set()
+
+
 async def collect_once(client, bot, push):
-    for username in config.CHANNELS:
+    for username in database.list_channels():
+        channel_push = push and username in _SEEN_CHANNELS
+        _SEEN_CHANNELS.add(username)
         try:
             entity = await client.get_entity(username)
             if not isinstance(entity, Channel):
@@ -36,7 +41,7 @@ async def collect_once(client, bot, push):
 
             messages = await client.get_messages(entity, limit=10)
             for message in reversed(messages):
-                text = message.text or message.message or ""
+                text = message.raw_text or ""
                 date = message.date.isoformat() if message.date else ""
                 link = channel_link(username, message.id)
                 await process_post(
@@ -46,8 +51,8 @@ async def collect_once(client, bot, push):
                     date,
                     link,
                     bot,
-                    notify=push and config.PUSH_TO_SUBSCRIBERS,
-                    retry_failed=push,
+                    notify=channel_push and config.PUSH_TO_SUBSCRIBERS,
+                    retry_failed=channel_push,
                 )
         except Exception as exc:
             logger.exception("Failed to collect @%s: %s", username, exc)
@@ -78,6 +83,7 @@ async def main():
         raise RuntimeError("CHANNELS must contain at least one channel")
 
     init_db()
+    database.seed_channels(config.CHANNELS)
     database.recover_interrupted_analyses(MAX_ANALYSIS_ATTEMPTS)
     bot = Bot(token=config.BOT_TOKEN)
     client = TelegramClient(
@@ -93,14 +99,12 @@ async def main():
         "Generate it locally with make_session.py and set it in Railway variables."
     )
 
-    allowed = set(config.CHANNELS)
-
     @client.on(events.NewMessage)
     async def on_new_message(event):
         if not event.is_channel or not event.chat:
             return
         username = getattr(event.chat, "username", None)
-        if not username or username.lower() not in allowed:
+        if not username or username.lower() not in database.list_channels():
             return
         username = username.lower()
         text = event.raw_text or ""
@@ -127,3 +131,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+

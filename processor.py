@@ -6,6 +6,7 @@ import time
 
 from telegram.constants import ParseMode
 
+import config
 import database
 from model_api import ModelAPIError, analyze_news
 from news_filter import fingerprint, is_financially_relevant, normalize_news
@@ -53,12 +54,64 @@ async def _analyze_with_throttle(text, channel, attempt):
                 _NEXT_MODEL_REQUEST_AT,
                 time.monotonic() + delay,
             )
+            fallback = await _gemini_analyze(text, channel)
+            if fallback is not None:
+                return fallback
             raise
         _NEXT_MODEL_REQUEST_AT = max(
             _NEXT_MODEL_REQUEST_AT,
             time.monotonic() + _MIN_MODEL_REQUEST_INTERVAL_SECONDS,
         )
         return result
+
+
+_GEMINI_LOCK = asyncio.Lock()
+_NEXT_GEMINI_REQUEST_AT = 0.0
+
+
+async def _gemini_analyze(text, channel):
+    """Validated result from Gemini, or None when disabled or failed."""
+    global _NEXT_GEMINI_REQUEST_AT
+
+    if not config.GEMINI_API_KEY:
+        return None
+    async with _GEMINI_LOCK:
+        delay = _NEXT_GEMINI_REQUEST_AT - time.monotonic()
+        if delay > 0:
+            await asyncio.sleep(delay)
+        _NEXT_GEMINI_REQUEST_AT = (
+            time.monotonic() + config.GEMINI_MIN_INTERVAL_SECONDS
+        )
+        try:
+            result = await asyncio.to_thread(
+                analyze_news,
+                text,
+                channel,
+                config.GEMINI_API_BASE_URL,
+                config.GEMINI_API_KEY,
+                config.GEMINI_MODEL,
+            )
+        except Exception as exc:
+            logger.warning("Gemini request failed (%s)", type(exc).__name__)
+            return None
+    if result["analysis"]:
+        result["analysis"]["provider"] = "Gemini"
+    return result
+
+
+async def _cross_check(text, channel, analysis):
+    if analysis.get("provider") == "Gemini":
+        return analysis
+    score = analysis["impact_score"]
+    if abs(score - config.MIN_IMPACT_SCORE) > config.GEMINI_BORDERLINE_RANGE:
+        return analysis
+    second = await _gemini_analyze(text, channel)
+    other = second["analysis"] if second else None
+    if not other:
+        return analysis
+    analysis["impact_score"] = round((score + other["impact_score"]) / 2)
+    analysis["provider"] = "Qwen+Gemini"
+    return analysis
 
 
 async def _broadcast_raw_once(channel, message_id, text, link, bot, raw_sent):
@@ -197,8 +250,18 @@ async def process_post(
             )
         return "analysis_not_required"
 
-    analysis = result["analysis"]
+    analysis = await _cross_check(text, channel, result["analysis"])
+    if analysis["impact_score"] < config.MIN_IMPACT_SCORE:
+        database.mark_post_low_impact(channel, message_id, analysis)
+        logger.info(
+            "Filtered low-impact post @%s/%s (score %s)",
+            channel,
+            message_id,
+            analysis["impact_score"],
+        )
+        return "low_impact"
     if notify:
+  
         raw_sent = await _broadcast_raw_once(
             channel, message_id, text, link, bot, raw_sent
         )
@@ -211,7 +274,7 @@ async def process_post(
 def format_analysis(channel, message_id, analysis):
     assets = analysis["affected_assets"] or ["مشخص نشده"]
     body = (
-        f"🧠 <b>تحلیل Qwen | @{html.escape(channel)} #{message_id}</b>\n"
+        f"🧠 <b>تحلیل {html.escape(analysis.get('provider', 'Qwen'))} | @{html.escape(channel)} #{message_id}</b>\n"
         f"⚡ اثر احتمالی: <b>{_IMPACT_LABELS[analysis['impact_level']]}</b> "
         f"({analysis['impact_score']}/100)\n"
         f"📊 سنتیمنت: <b>{_SENTIMENT_LABELS[analysis['sentiment']]}</b>\n"

@@ -52,6 +52,11 @@ def init_db():
                 UNIQUE(channel, message_id)
             );
 
+             CREATE TABLE IF NOT EXISTS channels (
+                username TEXT PRIMARY KEY,
+                added_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS subscribers (
                 chat_id INTEGER PRIMARY KEY,
                 active INTEGER NOT NULL DEFAULT 1,
@@ -414,7 +419,7 @@ def latest_news(channel=None, limit=10):
         "SELECT channel, message_id, text, date, link, analysis_json, "
         "analysis_status, analysis_error FROM posts "
         "WHERE relevant=1 AND duplicate_of_channel IS NULL "
-        "AND analysis_status!='advertisement' "
+        "AND analysis_status NOT IN ('advertisement', 'low_impact') "
     )
     params = []
     if channel:
@@ -449,6 +454,69 @@ def remove_subscriber(chat_id):
             (chat_id,),
         )
         connection.commit()
+
+
+def mark_post_low_impact(channel, message_id, analysis):
+    import json
+
+    with connect() as connection:
+        connection.execute(
+            """
+            UPDATE posts
+            SET analysis_json=?, impact_score=?, analysis_status='low_impact',
+                analysis_error=NULL, next_retry_at=NULL, analyzed_at=?
+            WHERE channel=? AND message_id=?
+            """,
+            (
+                json.dumps(analysis, ensure_ascii=False),
+                analysis.get("impact_score"),
+                utc_now(),
+                channel,
+                message_id,
+            ),
+        )
+        connection.commit()
+
+
+def list_channels():
+    with connect() as connection:
+        return [
+            row[0]
+            for row in connection.execute(
+                "SELECT username FROM channels ORDER BY added_at, username"
+            ).fetchall()
+        ]
+
+
+def add_channel(username):
+    with connect() as connection:
+        cursor = connection.execute(
+            "INSERT OR IGNORE INTO channels(username, added_at) VALUES (?, ?)",
+            (username, utc_now()),
+        )
+        connection.commit()
+        return cursor.rowcount > 0
+
+
+def remove_channel(username):
+    with connect() as connection:
+        cursor = connection.execute(
+            "DELETE FROM channels WHERE username=?", (username,)
+        )
+        connection.commit()
+        return cursor.rowcount > 0
+
+
+def seed_channels(defaults):
+    with connect() as connection:
+        count = connection.execute("SELECT COUNT(*) FROM channels").fetchone()[0]
+        if count == 0:
+            for name in defaults:
+                connection.execute(
+                    "INSERT OR IGNORE INTO channels(username, added_at) VALUES (?, ?)",
+                    (name, utc_now()),
+                )
+            connection.commit()
 
 
 def active_subscribers():
